@@ -5,21 +5,12 @@ This repository contains the REST API for the MatrixDB project, providing access
 ## Technologies Used
 
 - **Python**: Backend language for building the REST API.
-- **Flask** or **FastAPI** (depending on your framework): For handling HTTP requests and routing.
+- **Flask**: For handling HTTP requests and routing.
 - **MongoDB**: NoSQL database for storing ECM interaction data.
 - **Solr**: For handling full-text search functionality.
 - **Docker**: For containerized deployment and easy environment setup.
 - **Docker Compose**: For orchestrating the multi-container setup (API, MongoDB, Solr).
 
-## API Endpoints
-
-The API provides the following endpoints:
-
-- `GET /interactions`: Fetches all interactions.
-- `GET /interactions/{id}`: Fetches a specific interaction by ID.
-- `POST /interactions/search`: Search interactions based on criteria (uses Solr).
-- `POST /interactions`: Add new interaction data (admin access).
-- `DELETE /interactions/{id}`: Delete an interaction (admin access).
 
 ## Installation
 

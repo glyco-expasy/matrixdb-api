@@ -58,4 +58,11 @@ Once the services are running, you can interact with the API via HTTP requests. 
 curl http://localhost:8000/biomolecules/gag_1
 
 # GET search query 'LOX' for basic search
-curl api/search?query=LOX&mode=0 
+curl api/search?query=LOX&mode=0
+``` 
+
+## License
+
+This project’s source code is licensed under the GNU General Public License v3.0 (GPL-3.0).
+You are free to use, modify, and distribute the code under the terms of this license.
+For more details, see the official GPL-3.0 page.

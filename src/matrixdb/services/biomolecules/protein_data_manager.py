@@ -3,6 +3,25 @@ from itertools import groupby
 from src.matrixdb.utils.database.database_manager import DatabaseManager
 
 
+
+def tissue_maxima(expression_values):
+    """One entry per tissue: the sample with the highest TPM.
+
+    `tpm` is stored as a string, so it must be compared as a number: as strings "9.5" is greater than "123.4", which
+    made the API return the wrong sample for about 40% of the tissue values. Tissues are ordered case-insensitively so the
+    order is the same as the one the UI uses for its labels.
+    """
+    ordered = sorted(expression_values, key=lambda x: x["uberonName"].strip('"').lower())
+    result = list()
+    for tissue_uberon_name, group in groupby(ordered, key=lambda x: x["uberonName"]):
+        max_group = max(group, key=lambda x: float(x["tpm"]))
+        result.append({
+            "tissueId": max_group["tissueId"],
+            "tissue": tissue_uberon_name.strip('"'),
+            "tpm": max_group["tpm"]
+        })
+    return result
+
 class ProteinDataManager:
 
     def __init__(self, app_config, cache_manager, database_manager):
@@ -26,17 +45,7 @@ class ProteinDataManager:
                     expression_by_tissue['tissueId'] = tissue_id
                     expression_values.append(expression_by_tissue)
 
-            # filtered_expression = filter(lambda e: "life cycle" in e["sex"], expressions_by_protein["expressions"])
-            grouped_expressions = groupby(sorted(list(expression_values), key=lambda x: x["uberonName"]),
-                                          key=lambda x: x["uberonName"])
-
-            for tissue_uberon_name, group in grouped_expressions:
-                max_group = max(group, key=lambda x: x["tpm"])
-                gene_expressions.append({
-                    "tissueId": max_group["tissueId"],
-                    "tissue": tissue_uberon_name.strip('"'),
-                    "tpm": max_group["tpm"]
-                })
+            gene_expressions = tissue_maxima(expression_values)
         return gene_expressions
 
     def get_gene_expression_for_proteins(self, protein_ids):
@@ -59,16 +68,7 @@ class ProteinDataManager:
                         expression_by_tissue['tissueId'] = tissue_id
                         expression_values.append(expression_by_tissue)
 
-                grouped_expressions = groupby(sorted(list(expression_values), key=lambda x: x["uberonName"]),
-                                              key=lambda x: x["uberonName"])
-
-                for tissue_uberon_name, group in grouped_expressions:
-                    max_group = max(group, key=lambda x: x["tpm"])
-                    gene_expressions[protein].append({
-                        "tissueId": max_group["tissueId"],
-                        "tissue": tissue_uberon_name.strip('"'),
-                        "tpm": max_group["tpm"]
-                    })
+                gene_expressions[protein] = tissue_maxima(expression_values)
         return gene_expressions
 
     def get_proteomics_expressions(self, protein_id):

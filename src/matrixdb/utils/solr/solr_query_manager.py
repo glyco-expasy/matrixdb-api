@@ -1,3 +1,4 @@
+import re
 import urllib
 from urllib.parse import urlencode
 
@@ -38,6 +39,7 @@ class SolrQueryManager:
             return self.do_advanced_search(search_query)
 
     def do_simple_search(self, search_query):
+        search_query = search_query[:self.MAX_QUERY_LENGTH]
         biomolecule_query_params = {
             'q': f'{search_query}',
             "q.op": "OR",
@@ -89,41 +91,35 @@ class SolrQueryManager:
         '''
         return biomolecule_solr_docs
 
+    MAX_QUERY_LENGTH = 500
+    MAX_VALUES = 20
+
     def parse_advanced_query(self, query_part):
-        parsed_query_part = {
-            "field": query_part[:query_part.index(':')].strip(),
-        }
+        """'field: v1, v2' -> {"field": ..., "values": [...]}; None when the part is not of that form."""
+        if ":" not in query_part:
+            return None
+        field, _, raw = query_part.partition(":")
+        values = [v.strip() for v in raw.split(",") if v.strip()]
+        if not field.strip() or not values or len(values) > self.MAX_VALUES:
+            return None
+        return {"field": field.strip(), "values": values}
 
-        query_values = query_part[query_part.index(":") + 1:].strip()
-        if "," in query_values:
-            query_values = query_values.split(",")
-        else:
-            query_values = [query_values]
-
-        parsed_query_part["values"] = query_values
-        return parsed_query_part
+    @staticmethod
+    def escape_phrase(value):
+        """Make a user value safe inside a quoted Solr phrase (it used to be pasted in as it was, so a quote ended the phrase)."""
+        return value.replace("\\", "\\\\").replace('"', '\\"')
 
     def do_advanced_search(self, search_query):
-        if ":" not in search_query:
+        if ":" not in search_query or len(search_query) > self.MAX_QUERY_LENGTH:
             return list()
 
-        # Check if it has conjunction AND
-        parsed_query = []
-        if "and" in search_query.lower():
-            query_parts = search_query.split("and")
-            if len(query_parts) > 2:
-                return []
-
-            for query_part in query_parts:
-                parsed_query.append(self.parse_advanced_query(query_part))
-        else:
-            parsed_query.append(self.parse_advanced_query(search_query))
-
-        #for query_field in query_fields:
-        #    if query_field not in self.advanced_query_field_mappings:
-        #        return []
-
-        biomolecule_query_param_string = "q=*:*&rows=1000"
+        # "field: value AND field: value": split on the word AND (it used to split on any "and", even inside a value)
+        query_parts = re.split(r"\s+and\s+", search_query.strip(), flags=re.IGNORECASE)
+        if len(query_parts) > 2:
+            return []
+        parsed_query = [self.parse_advanced_query(part) for part in query_parts]
+        if any(part is None for part in parsed_query):
+            return []
 
         fq = []
         for parsed_query_part in parsed_query:
@@ -133,20 +129,15 @@ class SolrQueryManager:
             if query_field not in self.advanced_query_field_mappings:
                 return []
 
-            query_field_mappings = self.advanced_query_field_mappings[query_field]
             sub_fqs = []
-            for query_field_mapping in query_field_mappings:
-                field_level_fq = [f'{query_field_mapping}:"{query_parameter}"' for query_parameter in query_parameters]
-                if len(field_level_fq) > 1:
-                    sub_fq = ' OR '.join(field_level_fq)
-                else:
-                    sub_fq = field_level_fq[0]
-                sub_fqs.append(sub_fq)
+            for query_field_mapping in self.advanced_query_field_mappings[query_field]:
+                field_level_fq = [f'{query_field_mapping}:"{self.escape_phrase(query_parameter)}"' for query_parameter in query_parameters]
+                sub_fqs.append(' OR '.join(field_level_fq))
             fq.append(f'({" OR ".join(sub_fqs)})')
 
-        biomolecule_query_param_string += f'&fq=({" AND ".join(fq)})'
-        biomolecule_solr_docs = self.query_solr_with_url(f'{self.biomolecules_core_url}/select?{biomolecule_query_param_string}')
-        return biomolecule_solr_docs
+        # The filter is passed as a parameter (and URL-encoded by query_solr): it was concatenated into the URL, so a value
+        # could add parameters of its own (rows, fl, shards, ...).
+        return self.query_solr(self.biomolecules_core_url, {"q": "*:*", "rows": 1000, "fq": f'({" AND ".join(fq)})'})
 
     def search_publications(self, search_query):
 

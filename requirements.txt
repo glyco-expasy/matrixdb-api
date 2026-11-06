@@ -1,16 +1,15 @@
-Flask
-Flask-Caching
-Flask-Cors
-Flask-JWT
-gevent
-pymongo
-pyparsing
-requests
-urllib3
-pandas
-python-dotenv
+# Pinned to the versions the API was tested with (it was unpinned, so every build could pull different and untested releases).
+# Flask-JWT (and its dependency pyjwt 1.4.2, which has 15 published advisories) was listed but is not imported anywhere.
+Flask==3.1.3
+Flask-Caching==2.5.1
+Flask-Cors==6.0.5
+gevent==26.9.0
+numpy==2.5.4
+pandas==3.1.1
+pymongo==4.19.0
+pyparsing==3.3.3
+python-dotenv==1.2.4
+requests==2.34.2
+urllib3==2.8.0
+# the container's server (uwsgidecorators ships with uwsgi; pyuwsgi duplicated it)
 uwsgi
-pyuwsgi
-uwsgidecorators
-python-dotenv
-numpy

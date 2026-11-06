@@ -1,19 +1,21 @@
 version: "2.4"
 services:
   solr:
-    image: solr:latest
+    image: solr:9
     container_name: solr
     ports:
-      - "8983:8983"
+      # bound to the host's loopback: Solr has no authentication and its admin can delete cores
+      - "127.0.0.1:8983:8983"
     volumes:
       - solr-data:/var/solr
     restart: always
     networks:
       - matrixdb_network
   mongo:
-    image: mongo
+    image: mongo:5.0
     ports:
-      - 27018:27017
+      # loopback only: this MongoDB has no authentication (the API reaches it over the compose network)
+      - "127.0.0.1:27018:27017"
     volumes:
       - mongo-data:/data/db
     restart: always

@@ -5,6 +5,7 @@ from flask import Flask, request, Response
 from flask_caching import Cache
 from flask_cors import CORS
 import json
+from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 
 from gevent.pywsgi import WSGIServer
@@ -21,6 +22,8 @@ from src.matrixdb.utils.psicquic.psicquic_manager import getTotalResults
 from dotenv import load_dotenv
 import os
 
+from src.matrixdb.api.validation import ApiError, ids_from_body, json_body, string_list, found, MAX_NETWORK_IDS
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -29,11 +32,13 @@ app_config = {
     "primary_database_name": os.getenv("PRIMARY_DATABASE_NAME"),
     "secondary_database_name": os.getenv("SECONDARY_DATABASE_NAME"),
     "solr_url": os.getenv('SOLR_URL'),
-    "pdb_api_url": os.getenv('PDB_API_URL'),
+    # base URL of the PDB -> UniProt mappings, one request per PDB entry (the old value pointed at an API that no longer exists)
+    "pdb_api_url": os.getenv('PDB_API_URL', 'https://www.ebi.ac.uk/pdbe/api/mappings/uniprot').rstrip('/'),
 }
 
 config = {
-    "DEBUG": True,          # some Flask specific configs
+    "DEBUG": os.getenv("FLASK_DEBUG", "false").lower() == "true",   # was hard-coded True
+    "MAX_CONTENT_LENGTH": int(os.getenv("MAX_CONTENT_LENGTH", 1024 * 1024)),   # request bodies are lists of ids: 1 MB is plenty
     "CACHE_TYPE": "SimpleCache",  # Flask-Caching related configs
     "CACHE_DEFAULT_TIMEOUT": 300
 }
@@ -41,7 +46,7 @@ config = {
 app = Flask(__name__)
 cors = CORS(app, resources={
     r"/api/*": {
-        "origins": ["http://localhost:3000"],
+        "origins": [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
         "methods": ["GET", "POST", "PUT", "DELETE"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": True
@@ -49,6 +54,24 @@ cors = CORS(app, resources={
 })
 app.config.from_mapping(config)
 cache = Cache(app)
+
+
+@app.errorhandler(ApiError)
+def handle_api_error(error):
+    return Response(json.dumps({"error": error.message}), status=error.status, mimetype='application/json')
+
+
+@app.errorhandler(413)
+def handle_too_large(error):
+    return Response(json.dumps({"error": "The request is too large"}), status=413, mimetype='application/json')
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-site")
+    return response
 
 database_manager = DatabaseManager(app_config)
 cache_manager = CacheManager(app_config, database_manager)
@@ -70,6 +93,8 @@ def get_biomolecule_by_id(id):
             "_id": False
         }
     )
+
+    found(biomolecule, "biomolecule")
 
     # Include GO, uniprot keyword and interpro definitions
     meta_data_cache = cache_manager.get_meta_data()
@@ -136,7 +161,7 @@ def get_biomolecule_by_id(id):
 @app.route('/api/biomolecules/', methods=['POST'])
 def get_biomolecules_by_id():
     core_database_connection = database_manager.get_primary_connection()
-    biomoelcule_ids = json.loads(request.data)["ids"]
+    biomoelcule_ids = ids_from_body("ids")
     biomolecules = list(core_database_connection["biomolecules"].find({
         "id": {
             "$in": biomoelcule_ids
@@ -254,7 +279,7 @@ def get_biomolecule_interactors_by_id(id):
 @app.route('/api/biomolecules/proteins/expressions/', methods=['POST'])
 def get_protein_expression():
     expression_data = dict()
-    for protein in json.loads(request.data):
+    for protein in ids_from_body(None):
         gene = protein_data_manager.get_gene_name(protein)
         expression_data[protein] = {
             'gene': gene,
@@ -272,8 +297,9 @@ def get_binding_by_id(id):
     biomolecule = core_database_connection["biomolecules"].find_one({
         'id': id
     })
+    found(biomolecule, "biomolecule")
     pdb_entities = dict()
-    for pdb in biomolecule['molecular_details']['pdb']:
+    for pdb in (biomolecule.get('molecular_details') or {}).get('pdb', []):
         if "properties" in pdb:
             for prop in pdb["properties"]:
                 if prop["type"] == "chains":
@@ -296,26 +322,29 @@ def get_binding_by_id(id):
                             'end': chain_end
                         })
 
-    # Get the pdb to uniprot mapping
-    try:
-        response = requests.get(f'{app_config["pdb_api_url"]}/{id}', timeout=20)
-        pdb_response = response.json()
-        if "mappings" in pdb_response[id]:
-            pdb_mappings = pdb_response[id]["mappings"]
-            for pdb_mapping in pdb_mappings:
-                pdb_id = pdb_mapping['entry_id']
-                for segment in pdb_mapping['segments']:
-                    for chain in segment["chains"]:
-                        if pdb_id.upper() in pdb_entities:
-                            for pdb_chain in pdb_entities[pdb_id.upper()]:
-                                if chain == pdb_chain['chain']:
-                                    pdb_chain['pdb_start'] = segment['pdb_start']
-                                    pdb_chain['pdb_end'] = segment['pdb_end']
-                                    pdb_chain['unp_start'] = segment['unp_start']
-                                    pdb_chain['unp_end'] = segment['unp_end']
+    # Residue numbering of each structure (PDB numbering against UniProt numbering), used by the UI to place binding regions.
+    # PDBe no longer serves the old mapping keyed by the UniProt accession (it answered with an error body, and the lookup then
+    # raised KeyError and turned the whole call into a 500, so no structure was listed). The current API has one mapping per
+    # PDB entry, https://www.ebi.ac.uk/pdbe/api/mappings/uniprot/<pdb id>. Each call may fail on its own without losing the
+    # structure list: a structure without a mapping is simply listed without highlight offsets.
+    def fetch_pdb_mapping(pdb_id):
+        try:
+            response = requests.get(f'{app_config["pdb_api_url"]}/{pdb_id.lower()}', timeout=10)
+            response.raise_for_status()
+            return pdb_id, response.json()[pdb_id.lower()]["UniProt"][id]["mappings"]
+        except (requests.exceptions.RequestException, ValueError, KeyError, TypeError):
+            return pdb_id, []
 
-    except requests.exceptions.Timeout:
-        print("No pdb to uniprot mapping retrieved")
+    if pdb_entities:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for pdb_id, mappings in pool.map(fetch_pdb_mapping, list(pdb_entities)):
+                for mapping in mappings:
+                    for pdb_chain in pdb_entities[pdb_id]:
+                        if pdb_chain['chain'] == mapping.get('chain_id'):
+                            pdb_chain['pdb_start'] = mapping['start']['residue_number']
+                            pdb_chain['pdb_end'] = mapping['end']['residue_number']
+                            pdb_chain['unp_start'] = mapping['unp_start']
+                            pdb_chain['unp_end'] = mapping['unp_end']
 
     interactions = core_database_connection["interactions"].find({"participants": id})
 
@@ -381,7 +410,7 @@ def get_binding_by_id(id):
 def get_associations_by_biomolecules():
     try:
         core_database_connection = database_manager.get_primary_connection()
-        biomolecule_ids = json.loads(request.data)["biomolecules"]
+        biomolecule_ids = ids_from_body("biomolecules")
         interactions = list(core_database_connection["interactions"].find(
             {
                 "participants": {
@@ -434,8 +463,10 @@ def get_associations_by_biomolecules():
             "interactions": interactions,
             "participants": list(unique_participants.values())
         })
-    except:
-        traceback.print_tb()
+    except ApiError:
+        raise
+    except Exception:
+        traceback.print_exc()
         return json.dumps({
             "interactions": []
         })
@@ -521,7 +552,7 @@ def get_experiments_by_id(id):
 
 @app.route('/api/experiments/', methods=['POST'])
 def get_experiments_by_ids():
-    experiment_ids = json.loads(request.data)["ids"]
+    experiment_ids = ids_from_body("ids")
     core_database_connection = database_manager.get_primary_connection()
     experiments = core_database_connection["experiments_new"].find(
         {
@@ -547,7 +578,7 @@ def get_experiments_by_ids():
 
 @app.route('/api/xrefs', methods=['GET'])
 def get_xrefs_by_ids():
-    ids_to_search = request.args.getlist('id')
+    ids_to_search = string_list(request.args.getlist('id'), 'id')
     core_database_connection = database_manager.get_primary_connection()
     xrefs = core_database_connection["Keywrds"].find(
         {
@@ -564,7 +595,7 @@ def get_xrefs_by_ids():
 
 
 def search_query_key():
-    query = request.args.get("query")
+    query = request.args.get("query", "")[:500]
     hash_obj = hashlib.new('sha256')
     hash_obj.update(query.encode('utf-8'))
     return hash_obj.hexdigest()
@@ -628,19 +659,21 @@ def network_request_key():
       parameters. Other strategy could to use any hashing function.
     :returns: unique string for which the value should be cached.
     """
-    user_data = request.get_json()
+    user_data = json_body()
+    if not isinstance(user_data, dict):
+        raise ApiError("The request body must be an object")
     option = True
     if "onlyDirectPartners" in user_data:
-        option = user_data["onlyDirectPartners"]
-    key = ",".join([f"{value}" for value in user_data['biomolecules']])
+        option = bool(user_data["onlyDirectPartners"])
+    key = ",".join(string_list(user_data.get('biomolecules'), 'biomolecules', MAX_NETWORK_IDS))
     return f'{key}_{option}'
 
 
 @app.route('/api/network', methods=['POST'])
 @cache.cached(timeout=120, make_cache_key=network_request_key)
 def generate_network():
-    request_body = json.loads(request.data)
-    biomolecules = request_body["biomolecules"]
+    request_body = json_body()
+    biomolecules = string_list(request_body["biomolecules"], "biomolecules", MAX_NETWORK_IDS)
     second_neighborhood = False
     if "onlyDirectPartners" in request_body:
         second_neighborhood = not request_body["onlyDirectPartners"]
@@ -757,6 +790,9 @@ def get_psicquic_statistics(biomolecule_id):
         {"_id": False}
     )
 
+    found(biomolecule, "biomolecule")
+    query_id = None
+
     if biomolecule['type'] == 'gag' or biomolecule['type'] == 'smallmol' or biomolecule['type'] == 'lipid':
         query_id = biomolecule['xrefs']['chebi']
     if biomolecule['type'] == 'multimer':
@@ -765,6 +801,9 @@ def get_psicquic_statistics(biomolecule_id):
         query_id = biomolecule['xrefs']['uniprot']
     if biomolecule['type'] == 'protein':
         query_id = biomolecule_id
+
+    if query_id is None:
+        raise ApiError("This biomolecule has no PSICQUIC identifier", 404)
 
     total = getTotalResults(query_id)
 

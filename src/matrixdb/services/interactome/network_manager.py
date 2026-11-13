@@ -173,7 +173,7 @@ class NetworkManager:
                     for detection_method in interaction["spoke_detection_method"]:
                         # Extract the psimi id, should be fixed in data
                         if "psi-mi" in detection_method["interaction_detection_method"]:
-                            match = re.search(detection_method["interaction_detection_method"], "r'MI:\d+'")
+                            match = re.search(r'MI:\d+', detection_method["interaction_detection_method"])
                             if match:
                                 mi_id = match.group()
                         else:

@@ -385,6 +385,10 @@ def get_binding_by_id(id):
     for pdb_id in pdb_entities:
         pdb_chains = pdb_entities[pdb_id]
         for chain in pdb_chains:
+            # a chain has no residue offsets when PDBe's mapping could not be read (unreachable, or no data): list the
+            # structure without highlighted binding regions
+            if 'unp_start' not in chain or 'unp_end' not in chain:
+                continue
             for mapping_region in mapping_regions:
                 feature_value = mapping_region['featur_value']
                 if '?' in feature_value: continue
@@ -396,7 +400,7 @@ def get_binding_by_id(id):
                     continue
 
                 if int(chain['unp_start']) <= int(region_start) and int(region_end) <= int(chain['unp_end']):
-                    if 'mapping_regions' not in chain:
+                    if 'binding_regions' not in chain:
                         chain['binding_regions'] = list()
 
                     chain['binding_regions'].append({

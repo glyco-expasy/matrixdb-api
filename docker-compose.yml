@@ -12,7 +12,7 @@ services:
     networks:
       - matrixdb_network
   mongo:
-    image: mongo:5.0.33
+    image: mongo:8.0.38
     ports:
       # loopback only: this MongoDB has no authentication (the API reaches it over the compose network)
       - "127.0.0.1:27018:27017"
